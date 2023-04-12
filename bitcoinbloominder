@@ -1,0 +1,89 @@
+from pybloom_live import BloomFilter
+import base58
+import ecdsa
+import hashlib
+import random
+import requests
+
+def getPublicKey(private_key):
+    try:
+        private_key_bytes = bytes.fromhex(private_key)
+        # Get ECDSA public key
+        key = ecdsa.SigningKey.from_string(private_key_bytes, curve=ecdsa.SECP256k1).verifying_key
+        key_bytes = key.to_string()
+        key_hex = key_bytes.hex()
+        # Add bitcoin byte
+        bitcoin_byte = b'04'
+        public_key = bitcoin_byte + key_hex.encode()
+        return public_key
+    except ecdsa.MalformedPointError:
+        return None
+
+def getBitcoinAddress(public_key):
+    public_key_bytes = public_key
+    # Run SHA-256 for the public key
+    sha256_bpk = hashlib.sha256(public_key_bytes)
+    sha256_bpk_digest = sha256_bpk.digest()
+    # Run ripemd160 for the SHA-256
+    ripemd160_bpk = hashlib.new('ripemd160')
+    ripemd160_bpk.update(sha256_bpk_digest)
+    ripemd160_bpk_digest = ripemd160_bpk.digest()
+    ripemd160_bpk_hex = ripemd160_bpk.hexdigest()
+    # Add network byte
+    network_byte = b'00'
+    network_bitcoin_public_key = network_byte + ripemd160_bpk_hex.encode()
+    network_bitcoin_public_key_bytes = bytes.fromhex(network_bitcoin_public_key.decode())
+    # Double SHA-256 to get checksum
+    sha256_nbpk = hashlib.sha256(network_bitcoin_public_key_bytes)
+    sha256_nbpk_digest = sha256_nbpk.digest()
+    sha256_2_nbpk = hashlib.sha256(sha256_nbpk_digest)
+    sha256_2_nbpk_digest = sha256_2_nbpk.digest()
+    sha256_2_hex = sha256_2_nbpk.hexdigest()
+    checksum = sha256_2_hex[:8]
+    # Concatenate public key and checksum to get the address
+    address_hex = (network_bitcoin_public_key + checksum.encode()).decode()
+    wallet_len = len(address_hex)
+    wallet = base58.b58encode(bytes.fromhex(address_hex)).decode('utf-8')
+    return wallet
+
+def get_balance(address):
+  response = requests.get(f'https://blockchain.info/q/addressbalance/{address}')
+  return int(response.text)
+
+def scan(mode):
+  with open('btc.txt', 'r') as file:
+      wallets = file.read().splitlines()
+
+  bloomfilter = BloomFilter(capacity=len(wallets), error_rate=0.1)
+
+  for wallet in wallets:
+      bloomfilter.add(wallet)
+
+  if mode == 'manual':
+      for i in range(2**31):
+          private_key = f'{i:0>64x}'
+          public_key = getPublicKey(private_key)
+          if public_key is not None:
+              address = getBitcoinAddress(public_key)
+
+              if address in bloomfilter:
+                  balance = get_balance(address)
+                  if balance > 0:
+                      with open('found.txt', 'a') as f:
+                          f.write(f'Found: {address} Private Key: {private_key} Balance: {balance}\n')
+  elif mode == 'random':
+      while True:
+          private_key = f'{random.randint(0, 2**31):0>64x}'
+          public_key = getPublicKey(private_key)
+          if public_key is not None:
+              address = getBitcoinAddress(public_key)
+
+              if address in bloomfilter:
+                  balance = get_balance(address)
+                  if balance > 0:
+                      with open('found.txt', 'a') as f:
+                          f.write(f'Found: {address} Private Key: {private_key} Balance: {balance}\n')
+
+if __name__ == '__main__':
+  mode = input('Enter mode (manual or random): ')
+  scan(mode)
